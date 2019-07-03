@@ -60,6 +60,11 @@ error_chain! {
             description("An error occurred when trying to execute a write operation:")
             display("{}", inner)
         }
+
+        AuthenticationError(msg: String) {
+            description("WIP")
+            display("WIP")
+        }
     }
 }
 
