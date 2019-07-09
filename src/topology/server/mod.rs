@@ -1,7 +1,7 @@
 mod description;
 pub mod monitor;
 
-use std::sync::Arc;
+use std::{ops::DerefMut, sync::Arc};
 
 use derivative::Derivative;
 
@@ -42,26 +42,26 @@ impl Server {
     }
 
     pub(crate) fn acquire_stream(&self) -> Result<Connection> {
-        let mut conn = self.pool.get()?;
-
-        // Connection handshake
-        is_master(&mut conn, true)?;
-
+        let conn = self.pool.get()?;
         Ok(conn)
     }
 
     pub(crate) fn check(&mut self, server_type: ServerType) -> ServerDescription {
         let mut conn = self.monitor_pool.get().unwrap();
-        let mut description =
-            ServerDescription::new(&self.host.display(), Some(is_master(&mut conn, false)));
+        let mut description = ServerDescription::new(
+            &self.host.display(),
+            Some(is_master(conn.deref_mut(), false)),
+        );
 
         if description.error.is_some() {
             self.reset_pools();
 
             if server_type != ServerType::Unknown {
                 conn = self.monitor_pool.get().unwrap();
-                description =
-                    ServerDescription::new(&self.host.display(), Some(is_master(&mut conn, false)));
+                description = ServerDescription::new(
+                    &self.host.display(),
+                    Some(is_master(conn.deref_mut(), false)),
+                );
             }
         }
 

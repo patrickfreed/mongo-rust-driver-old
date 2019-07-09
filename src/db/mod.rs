@@ -1,6 +1,6 @@
 pub mod options;
 
-use std::sync::Arc;
+use std::{ops::DerefMut, sync::Arc};
 
 use bson::{Bson, Document};
 
@@ -417,7 +417,7 @@ impl Database {
         let slave_ok = self.client().slave_ok(&address, read_pref);
         Ok((
             address,
-            run_command(&mut stream, &self.inner.name, doc, slave_ok)?,
+            run_command(stream.deref_mut(), &self.inner.name, doc, slave_ok)?,
         ))
     }
 }

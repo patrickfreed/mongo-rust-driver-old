@@ -2,7 +2,7 @@ use std::{
     env,
     io::{self, Read, Write},
     net::TcpStream,
-    ops::{Deref, DerefMut},
+    ops::Deref,
     sync::Arc,
 };
 
@@ -99,15 +99,20 @@ impl ManageConnection for Connector {
         let socket = TcpStream::connect(&self.host.display())?;
         socket.set_nodelay(true)?;
 
-        match self.tls_config {
+        let mut stream = match self.tls_config {
             Some(ref cfg) => {
                 let name = DNSNameRef::try_from_ascii_str(self.host.hostname()).expect("TODO: fix");
                 let session = rustls::ClientSession::new(cfg, name);
 
-                Ok(Stream::Tls(rustls::StreamOwned::new(session, socket)))
+                Stream::Tls(rustls::StreamOwned::new(session, socket))
             }
-            None => Ok(Stream::Basic(socket)),
-        }
+            None => Stream::Basic(socket),
+        };
+
+        // perform MongoDB handshake
+        is_master(&mut stream, true)?;
+
+        Ok(stream)
     }
 
     // We purposely do nothing here since `is_valid` is called before a connection is returned from
@@ -122,8 +127,8 @@ impl ManageConnection for Connector {
     }
 }
 
-pub fn run_command(
-    conn: &mut Connection,
+pub fn run_command<T: Read + Write>(
+    conn: &mut T,
     db: &str,
     doc: Document,
     slave_ok: bool,
@@ -158,7 +163,7 @@ pub fn run_command(
     (&mut bytes[0..4]).write_i32::<LittleEndian>(num_bytes as i32)?;
 
     let _ = conn.write(&bytes[..])?;
-    let reply = Reply::read(conn.deref_mut())?;
+    let reply = Reply::read(conn)?;
 
     match reply.docs.into_iter().next() {
         Some(doc) => Ok(doc),
@@ -173,7 +178,7 @@ pub struct IsMasterReply {
     pub round_trip_time: i64,
 }
 
-pub fn is_master(conn: &mut Connection, handshake: bool) -> Result<IsMasterReply> {
+pub fn is_master<T: Read + Write>(conn: &mut T, handshake: bool) -> Result<IsMasterReply> {
     let doc = if handshake {
         doc! {
             "isMaster": 1,
