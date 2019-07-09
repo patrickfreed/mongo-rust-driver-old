@@ -13,6 +13,7 @@ use rustls::{
 };
 
 use crate::{
+    client::auth::MongoCredential,
     concern::{Acknowledgment, ReadConcern, WriteConcern},
     error::{Error, ErrorKind, Result},
     read_preference::{ReadPreference, TagSet},
@@ -110,6 +111,9 @@ pub struct ClientOptions {
 
     #[builder(default)]
     pub server_selection_timeout: Option<Duration>,
+
+    #[builder(default)]
+    pub credentials: Option<MongoCredential>,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -124,6 +128,7 @@ struct ClientOptionsParser {
     pub repl_set_name: Option<String>,
     pub write_concern: Option<WriteConcern>,
     pub server_selection_timeout: Option<Duration>,
+    pub credentials: Option<MongoCredential>,
     read_preference_tags: Option<Vec<TagSet>>,
 }
 
@@ -211,6 +216,7 @@ impl From<ClientOptionsParser> for ClientOptions {
             repl_set_name: parser.repl_set_name,
             write_concern: parser.write_concern,
             server_selection_timeout: parser.server_selection_timeout,
+            credentials: parser.credentials,
         }
     }
 }
@@ -238,6 +244,8 @@ impl ClientOptionsParser {
         }
 
         let after_scheme = &s[end_of_scheme + 3..];
+
+        // TODO: parse URI for username/password
 
         let (host_section, options_section) = match after_scheme.find('/') {
             Some(index) => after_scheme.split_at(index),

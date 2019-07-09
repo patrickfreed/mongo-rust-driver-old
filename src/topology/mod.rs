@@ -43,7 +43,7 @@ impl Topology {
                     host.clone(),
                     options.max_pool_size,
                     tls_config.clone(),
-                    None,
+                    options.credentials.clone(),
                 )));
                 (host.display(), server)
             })

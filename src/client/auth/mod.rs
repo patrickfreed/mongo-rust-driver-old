@@ -1,33 +1,30 @@
 pub(crate) mod scram;
 
-use crate::{command_responses::IsMasterCommandResponse, error::Result};
+use crate::command_responses::IsMasterCommandResponse;
 use base64;
 use bson::Document;
-use hmac::{Hmac, Mac};
-use rand::{distributions::Alphanumeric, rngs::StdRng, CryptoRng, Rng};
-use sha1::{Digest, Sha1};
-use std::ops::BitXor;
+use rand::Rng;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum AuthMechanism {
     SCRAMSHA1,
 }
 
 impl AuthMechanism {
-    fn from_str(string: &str) -> Option<AuthMechanism> {
-        match string {
-            "SCRAM_SHA_1" => Some(AuthMechanism::SCRAMSHA1),
-            _ => None,
-        }
-    }
+    //    fn from_str(string: &str) -> Option<AuthMechanism> {
+    //        match string {
+    //            "SCRAM_SHA_1" => Some(AuthMechanism::SCRAMSHA1),
+    //            _ => None,
+    //        }
+    //    }
 
-    pub(crate) fn from_is_master(reply: &IsMasterCommandResponse) -> AuthMechanism {
+    pub(crate) fn from_is_master(_reply: &IsMasterCommandResponse) -> AuthMechanism {
         // TODO: RUST-87 check for SCRAM-SHA-256 first
         AuthMechanism::SCRAMSHA1
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct MongoCredential {
     pub username: String,
 
@@ -63,7 +60,7 @@ impl MongoCredential {
 }
 
 pub fn generate_nonce() -> String {
-    let mut result = vec![0, 32];
+    let mut result = vec![0; 32];
     let mut rng = rand::thread_rng();
 
     for i in 0..32 {

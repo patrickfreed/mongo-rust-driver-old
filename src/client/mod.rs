@@ -186,11 +186,15 @@ impl Client {
     fn list_databases_command(&self, cmd: Document) -> Result<ListDatabasesResponse> {
         let (_, result) = self.database("admin").run_driver_command(cmd, None, None)?;
 
-        match bson::from_bson(Bson::Document(result)) {
+        match bson::from_bson(Bson::Document(result.clone())) {
             Ok(response) => Ok(response),
-            Err(_) => bail!(ErrorKind::ResponseError(
-                "invalid server response to listDatabases command".to_string()
-            )),
+            Err(e) => {
+                println!("reply: {:?}, error: {:?}", result.clone(), e);
+                Err(ErrorKind::ResponseError(
+                    "invalid server response to listDatabases command".to_string(),
+                )
+                .into())
+            }
         }
     }
 

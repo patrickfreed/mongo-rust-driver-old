@@ -1,3 +1,8 @@
+use mongodb::{
+    options::{ClientOptions, MongoCredential},
+    Client,
+};
+
 use bson::Bson;
 
 use crate::CLIENT;
@@ -122,5 +127,30 @@ fn list_database_names() {
 
     for name in expected_dbs {
         assert_eq!(new_dbs.iter().filter(|db_name| db_name == &name).count(), 1);
+    }
+}
+
+#[test]
+#[function_name]
+fn auth() {
+    let opts = ClientOptions::builder()
+        .credentials(Some(MongoCredential {
+            username: "user".to_string(),
+            source: "admin".to_string(),
+            password: Some("pencil".to_string()),
+            mechanism: None,
+            mechanism_properties: None,
+        }))
+        .max_pool_size(1)
+        .build();
+
+    if let Some(client) = Client::with_options(opts).ok() {
+        if let Some(result) = client.list_database_names(None).ok() {
+            println!("{:?}", result);
+        } else {
+            println!("result failed");
+        }
+    } else {
+        println!("failed")
     }
 }

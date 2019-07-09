@@ -47,7 +47,7 @@ impl Server {
         let mut conn = self.pool.get()?;
 
         // Connection handshake
-        is_master(&mut conn, true, None)?;
+        //        is_master(&mut conn, true, None)?;
 
         Ok(conn)
     }
