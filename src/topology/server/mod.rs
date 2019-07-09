@@ -44,11 +44,7 @@ impl Server {
     }
 
     pub(crate) fn acquire_stream(&self) -> Result<Connection> {
-        let mut conn = self.pool.get()?;
-
-        // Connection handshake
-        //        is_master(&mut conn, true, None)?;
-
+        let conn = self.pool.get()?;
         Ok(conn)
     }
 

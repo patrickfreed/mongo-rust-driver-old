@@ -138,8 +138,7 @@ fn auth() {
             username: "user".to_string(),
             source: "admin".to_string(),
             password: Some("pencil".to_string()),
-            mechanism: None,
-            mechanism_properties: None,
+            ..Default::default()
         }))
         .max_pool_size(1)
         .build();

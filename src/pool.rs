@@ -14,11 +14,10 @@ use time::PreciseTime;
 use webpki::DNSNameRef;
 
 use crate::{
-    client::auth::{scram, AuthMechanism, MongoCredential},
+    client::{auth, auth::MongoCredential},
     command_responses::IsMasterCommandResponse,
     error::{Error, ErrorKind, Result},
     options::Host,
-    topology::ServerType,
     wire::{new_request_id, Header, OpCode, Query, QueryFlags, Reply},
 };
 
@@ -49,7 +48,6 @@ impl Pool {
                 tls_config,
                 credential,
             })?;
-
         Ok(Self { pool })
     }
 }
@@ -99,62 +97,11 @@ impl Write for Stream {
     }
 }
 
-impl Connector {
-    fn authenticate_stream<T: Read + Write>(
-        &self,
-        connection: &mut T,
-        credential: &MongoCredential,
-    ) -> Result<()> {
-        println!("authenticating");
-
-        let mechanism = credential.mechanism().ok_or::<Error>(
-            ErrorKind::AuthenticationError("Missing mechanism".to_string()).into(),
-        )?;
-
-        match &mechanism {
-            AuthMechanism::SCRAMSHA1 => match scram::authenticate_stream(connection, credential) {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    println!("scram failed: {:?}", e);
-                    Err(e)
-                }
-            },
-        }
-    }
-}
-//    /// If credentials are provided, perform an authentication handshake. Otherwise, do nothing.
-//    fn auth_handshake(&self, connection: &mut Connection) -> Result<()> {
-//        match &self.credential {
-//            Some(credential) => match is_master(connection, true, Some(credential.clone())) {
-//                Ok(reply) => {
-//                    let server_type = ServerType::from_ismaster_response(&reply.command_response);
-//                    if !server_type.can_auth() {
-//                        return Ok(());
-//                    };
-//                    let mechanism = credential
-//                        .mechanism()
-//                        .unwrap_or(AuthMechanism::from_is_master(&reply.command_response));
-//                    let full_credential = MongoCredential {
-//                        mechanism: Some(mechanism),
-//                        ..credential.clone()
-//                    };
-//                    self.authenticate_stream(connection, &full_credential)
-//                }
-//                Err(e) => bail!(ErrorKind::AuthenticationError(
-//                    "is master failed".to_string()
-//                )),
-//            },
-//            None => Ok(()),
-//        }
-//    }
-
 impl ManageConnection for Connector {
     type Connection = Stream;
     type Error = Error;
 
     fn connect(&self) -> Result<Self::Connection> {
-        println!("connecting to: {}\n", &self.host.display());
-
         let socket = TcpStream::connect(&self.host.display())?;
         socket.set_nodelay(true)?;
 
@@ -169,29 +116,11 @@ impl ManageConnection for Connector {
         };
 
         if let Some(credential) = &self.credential {
-            println!("performing auth");
+            auth::authenticate_stream(&mut stream, credential)?;
+        } else {
+            is_master_stream(&mut stream, true, None)?;
+        }
 
-            match is_master_stream(&mut stream, false, Some(credential.clone())) {
-                Ok(reply) => {
-                    let server_type = ServerType::from_ismaster_response(&reply.command_response);
-                    if !server_type.can_auth() {
-                        println!("can't auth {:?}", server_type);
-                        return Ok(stream);
-                    };
-                    let mechanism = credential
-                        .mechanism()
-                        .unwrap_or(AuthMechanism::from_is_master(&reply.command_response));
-                    let full_credential = MongoCredential {
-                        mechanism: Some(mechanism),
-                        ..credential.clone()
-                    };
-                    self.authenticate_stream(&mut stream, &full_credential)?;
-                }
-                Err(_) => bail!(ErrorKind::AuthenticationError(
-                    "is master failed".to_string()
-                )),
-            }
-        };
         Ok(stream)
     }
 
