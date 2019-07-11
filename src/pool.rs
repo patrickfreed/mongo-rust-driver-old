@@ -257,10 +257,9 @@ pub fn is_master_stream<T: Read + Write>(
     };
 
     if let Some(cred) = credential {
-        doc.insert(
-            "saslSupportedMechs",
-            format!("{}.{}", cred.source(), cred.username()),
-        );
+        if let Some(user) = cred.username() {
+            doc.insert("saslSupportedMechs", format!("{}.{}", cred.source(), user));
+        }
     };
 
     let start = PreciseTime::now();
@@ -277,9 +276,9 @@ pub fn is_master_stream<T: Read + Write>(
 pub fn is_master(
     conn: &mut Connection,
     handshake: bool,
-    credential: Option<MongoCredential>,
+    _credential: Option<MongoCredential>,
 ) -> Result<IsMasterReply> {
-    let mut doc = if handshake {
+    let doc = if handshake {
         doc! {
             "isMaster": 1,
             "client": {
@@ -296,13 +295,6 @@ pub fn is_master(
     } else {
         doc! { "isMaster": 1 }
     };
-
-    if let Some(cred) = credential {
-        doc.insert(
-            "saslSupportedMechs",
-            format!("{}.{}", "admin", cred.username()),
-        );
-    }
 
     let start = PreciseTime::now();
     let doc = run_command(conn, "admin", doc, false)?;

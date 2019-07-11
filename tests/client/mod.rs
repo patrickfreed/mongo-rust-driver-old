@@ -133,9 +133,13 @@ fn list_database_names() {
 #[test]
 #[function_name]
 fn auth() {
+    let uri_opts =
+        ClientOptions::parse("mongodb://user:pencil@127.0.0.1/?poolSize=1&authSource=admin").unwrap();
+    println!("{:?}", uri_opts);
+
     let opts = ClientOptions::builder()
         .credentials(Some(MongoCredential {
-            username: "user".to_string(),
+            username: Some("user".to_string()),
             source: "admin".to_string(),
             password: Some("pencil".to_string()),
             ..Default::default()
@@ -143,7 +147,17 @@ fn auth() {
         .max_pool_size(1)
         .build();
 
-    if let Some(client) = Client::with_options(opts).ok() {
+    if let Some(client) = Client::with_options(uri_opts.clone()).ok() {
+        if let Some(result) = client.list_database_names(None).ok() {
+            println!("{:?}", result);
+        } else {
+            println!("result failed");
+        }
+    } else {
+        println!("failed")
+    }
+
+    if let Some(client) = Client::with_options(uri_opts).ok() {
         if let Some(result) = client.list_database_names(None).ok() {
             println!("{:?}", result);
         } else {

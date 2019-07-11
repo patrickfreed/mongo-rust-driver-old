@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fmt,
     fs::File,
     io::{BufReader, Seek, SeekFrom},
@@ -7,19 +8,32 @@ use std::{
     time::Duration,
 };
 
-use percent_encoding::percent_decode;
+use percent_encoding;
 use rustls::{
     internal::pemfile, Certificate, RootCertStore, ServerCertVerified, ServerCertVerifier, TLSError,
 };
 
 use crate::{
-    client::auth::MongoCredential,
+    client::auth::{AuthMechanism, MongoCredential},
     concern::{Acknowledgment, ReadConcern, WriteConcern},
     error::{Error, ErrorKind, Result},
     read_preference::{ReadPreference, TagSet},
 };
 
 const DEFAULT_PORT: u16 = 27017;
+
+lazy_static! {
+    /// Reserved characters as defined by [Section 2.2 of RFC-3986](https://tools.ietf.org/html/rfc3986#section-2.2).
+    /// Usernames / passwords that contain these characters must instead include the URL encoded version of them when included
+    /// as part of the connection string.
+    static ref USERINFO_RESERVED_CHARACTERS: HashSet<char> = {
+        [':', '/', '?', '#', '[', ']', '@', '!'].iter().cloned().collect()
+    };
+
+    static ref ILLEGAL_DATABASE_CHARACTERS: HashSet<char> = {
+        ['/', '\\', ' ', '"', '$', '.'].iter().cloned().collect()
+    };
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Host {
@@ -129,6 +143,8 @@ struct ClientOptionsParser {
     pub write_concern: Option<WriteConcern>,
     pub server_selection_timeout: Option<Duration>,
     pub credentials: Option<MongoCredential>,
+    auth_mechanism: Option<AuthMechanism>,
+    auth_source: Option<String>,
     read_preference_tags: Option<Vec<TagSet>>,
 }
 
@@ -227,6 +243,25 @@ impl ClientOptions {
     }
 }
 
+/// Splits a string into a section before a given index and a section exclusively after the index.
+/// Empty portions are returned as `None`.
+fn exclusive_split_at(s: &str, i: usize) -> (Option<&str>, Option<&str>) {
+    let (l, r) = s.split_at(i);
+
+    let lout = if l.len() > 0 { Some(l) } else { None };
+    let rout = if r.len() > 1 { Some(&r[1..]) } else { None };
+
+    (lout, rout)
+}
+
+fn percent_decode(s: &str, err_message: &str) -> Result<String> {
+    let out = percent_encoding::percent_decode(s.as_bytes())
+        .decode_utf8()
+        .or::<Error>(Err(ErrorKind::ArgumentError(err_message.to_string()).into()))?
+        .to_string();
+    Ok(out)
+}
+
 impl ClientOptionsParser {
     fn parse(s: &str) -> Result<Self> {
         let end_of_scheme = match s.find("://") {
@@ -245,14 +280,58 @@ impl ClientOptionsParser {
 
         let after_scheme = &s[end_of_scheme + 3..];
 
-        // TODO: parse URI for username/password
-
-        let (host_section, options_section) = match after_scheme.find('/') {
-            Some(index) => after_scheme.split_at(index),
-            None => (after_scheme, ""),
+        let (pre_slash, post_slash) = match after_scheme.find('/') {
+            Some(slash_index) => match exclusive_split_at(after_scheme, slash_index) {
+                (Some(section), o) => (section, o),
+                (None, _) => bail!(ErrorKind::ArgumentError("missing hosts".to_string())),
+            },
+            None => (after_scheme, None),
         };
 
-        let hosts: Result<Vec<_>> = host_section
+        let (database, options_section) = match post_slash {
+            Some(section) => match section.find('?') {
+                Some(index) => exclusive_split_at(section, index),
+                None => (post_slash, None),
+            },
+            None => (None, None),
+        };
+
+        let decoded_db = match database {
+            Some(db) => {
+                let decoded = percent_decode(db, "database name must be URL encoded")?;
+                if decoded
+                    .chars()
+                    .any(|c| ILLEGAL_DATABASE_CHARACTERS.contains(&c))
+                {
+                    bail!(ErrorKind::ArgumentError(
+                        "illegal character in database name".to_string()
+                    ))
+                }
+                Some(decoded)
+            }
+            None => None,
+        };
+
+        let (cred_section, hosts_section) = match pre_slash.rfind('@') {
+            Some(index) => {
+                let (creds, hosts) = exclusive_split_at(pre_slash, index);
+                match hosts {
+                    Some(hs) => (creds, hs),
+                    None => bail!(ErrorKind::ArgumentError("missing hosts".to_string())),
+                }
+            }
+            None => (None, pre_slash),
+        };
+
+        let (username, password) = match cred_section {
+            Some(creds) => match creds.find(':') {
+                Some(index) => exclusive_split_at(creds, index),
+                None => (Some(creds), None),
+            },
+            None => (None, None),
+        };
+
+        let hosts: Result<Vec<_>> = hosts_section
             .split(',')
             .map(|host| {
                 let (hostname, port) = match host.find(':') {
@@ -294,10 +373,53 @@ impl ClientOptionsParser {
             ..Default::default()
         };
 
-        options.parse_options(options_section)?;
+        if let Some(opts) = options_section {
+            options.parse_options(opts)?;
+        }
 
         if let Some(ref write_concern) = options.write_concern {
             write_concern.validate()?;
+        }
+
+        if let Some(u) = username {
+            let mut credential = options.credentials.get_or_insert_with(Default::default);
+            let decoded_u = percent_decode(u, "username must be URL encoded")?;
+            if decoded_u
+                .chars()
+                .any(|c| USERINFO_RESERVED_CHARACTERS.contains(&c))
+            {
+                bail!(ErrorKind::ArgumentError(
+                    "username must be URL encoded".to_string()
+                ));
+            }
+            credential.username = Some(decoded_u);
+
+            if let Some(pass) = password {
+                if pass
+                    .chars()
+                    .any(|c| USERINFO_RESERVED_CHARACTERS.contains(&c))
+                {
+                    bail!(ErrorKind::ArgumentError(
+                        "password must bee URL encoded".to_string()
+                    ));
+                }
+                let decoded_p = percent_decode(pass, "password must be URL encoded")?;
+                credential.password = Some(decoded_p)
+            }
+        }
+
+        if options.auth_mechanism.is_some() {
+            let mut credential = options.credentials.get_or_insert_with(Default::default);
+            credential.mechanism = options.auth_mechanism.clone();
+        }
+
+        if let Some(credential) = &mut options.credentials {
+            // if credentials are specified but no auth source, we first default to the specified
+            // database. otherwise, we use "admin".
+            credential.source = options
+                .auth_source
+                .clone()
+                .unwrap_or(decoded_db.unwrap_or_else(|| "admin".to_string()));
         }
 
         Ok(options)
@@ -308,12 +430,7 @@ impl ClientOptionsParser {
             return Ok(());
         }
 
-        let options_section = match options.find('?') {
-            Some(index) if index < options.len() - 1 => &options[index + 1..],
-            _ => return Ok(()),
-        };
-
-        for option_pair in options_section.split('&') {
+        for option_pair in options.split('&') {
             let (key, value) = match option_pair.find('=') {
                 Some(index) => option_pair.split_at(index),
                 None => bail!(ErrorKind::ArgumentError(format!(
@@ -325,7 +442,7 @@ impl ClientOptionsParser {
             // Skip leading '=' in value.
             self.parse_option_pair(
                 &key.to_lowercase(),
-                percent_decode(&value.as_bytes()[1..])
+                percent_encoding::percent_decode(&value.as_bytes()[1..])
                     .decode_utf8_lossy()
                     .as_ref(),
             )?;
@@ -492,6 +609,13 @@ impl ClientOptionsParser {
                 let write_concern = self.write_concern.get_or_insert_with(Default::default);
                 write_concern.w_timeout = Some(Duration::from_millis(get_ms!(value, k)));
             }
+            "authmechanism" => {
+                let mechanism = AuthMechanism::from_str(value).ok_or::<Error>(
+                    ErrorKind::ArgumentError(format!("invalid mechanism \"{}\"", value)).into(),
+                )?;
+                self.auth_mechanism = Some(mechanism)
+            }
+            "authsource" => self.auth_source = Some(value.to_string()),
             _ => {}
         }
 

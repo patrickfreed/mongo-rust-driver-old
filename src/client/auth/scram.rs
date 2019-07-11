@@ -1,9 +1,11 @@
 use std::{
+    collections::HashMap,
     fmt,
     fmt::{Display, Formatter},
     io::{Read, Write},
     ops::{BitXor, Deref, Range},
     str,
+    sync::RwLock,
 };
 
 use hmac::{Hmac, Mac};
@@ -16,7 +18,7 @@ use bson::{spec::BinarySubtype, Bson, Document};
 
 use crate::{
     client::{auth, auth::MongoCredential},
-    error::{Error, Result},
+    error::Result,
     pool,
 };
 
@@ -35,7 +37,23 @@ const NO_CHANNEL_BINDING: char = 'n';
 /// The minimum number of iterations of the hash function that we will accept from the server.
 const MIN_ITERATION_COUNT: usize = 4096;
 
+lazy_static! {
+    /// Cache of pre-computed salted passwords.
+    static ref CREDENTIAL_CACHE: RwLock<HashMap<CacheEntry, Vec<u8>>> = {
+        RwLock::new(HashMap::new())
+    };
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct CacheEntry {
+    password: String,
+    salt: Vec<u8>,
+    i: usize,
+    mechanism: ScramVersion,
+}
+
 /// The versions of SCRAM supported by the driver (classified according to hash function used).
+#[derive(Hash, Eq, PartialEq, Clone)]
 pub(crate) enum ScramVersion {
     SHA1,
 }
@@ -100,6 +118,23 @@ impl ScramVersion {
         //        xor(output.as_slice(), next.as_slice())
         //    })
     }
+
+    /// Computes the salted password according to the SCRAM RFC and the MongoDB specific password
+    /// hashing algorithm.
+    fn compute_salted_password(
+        &self,
+        username: &str,
+        password: &str,
+        i: usize,
+        salt: &[u8],
+    ) -> Result<Vec<u8>> {
+        let mut md5 = Md5::new();
+        md5.input(format!("{}:mongo:{}", username, password));
+        let hashed_password = hex::encode(md5.result());
+        let normalized_password = stringprep::saslprep(hashed_password.as_str())
+            .or(Err(auth::error("SCRAM", "saslprep failure")))?;
+        Ok(self.h_i(normalized_password.deref(), salt, i))
+    }
 }
 
 impl Display for ScramVersion {
@@ -117,30 +152,6 @@ pub fn xor(lhs: &[u8], rhs: &[u8]) -> Vec<u8> {
         .zip(rhs.iter())
         .map(|(l, r)| l.bitxor(r.clone()))
         .collect()
-}
-
-/// Gets the salted password. Will first check for cached credentials and return those if possible.
-/// Updates the cache to store any computed credentials.
-fn get_salted_password(
-    credential: &MongoCredential,
-    server_first: &ServerFirst,
-    scram: &ScramVersion,
-) -> Result<Vec<u8>> {
-    // TODO: check for cached credentials here
-    let mut md5 = Md5::new();
-    md5.input(format!(
-        "{}:mongo:{}",
-        credential.username(),
-        credential.password().unwrap()
-    ));
-    let hashed_password = hex::encode(md5.result());
-    let normalized_password = stringprep::saslprep(hashed_password.as_str())
-        .or::<Error>(Err(auth::error("SCRAM", "saslprep failure")))?;
-    Ok(scram.h_i(
-        normalized_password.deref(),
-        server_first.salt(),
-        server_first.i(),
-    ))
 }
 
 /// Parses a string slice of the form "<expected_key>=<body>" into "<body>", if possible.
@@ -224,8 +235,8 @@ impl ServerFirst {
         };
         let done = response
             .get_bool("done")
-            .or::<Error>(Err(auth::invalid_response("SCRAM")))?;
-        let message = str::from_utf8(payload).or::<Error>(Err(auth::invalid_response("SCRAM")))?;
+            .or(Err(auth::invalid_response("SCRAM")))?;
+        let message = str::from_utf8(payload).or(Err(auth::invalid_response("SCRAM")))?;
 
         let parts: Vec<&str> = message.split(",").collect();
 
@@ -235,7 +246,8 @@ impl ServerFirst {
 
         let full_nonce = parse_kvp(parts[0], NONCE_KEY)?;
 
-        let salt = base64::decode(parse_kvp(parts[1], SALT_KEY)?.as_str()).unwrap();
+        let salt = base64::decode(parse_kvp(parts[1], SALT_KEY)?.as_str())
+            .or(Err(auth::invalid_response("SCRAM")))?;
 
         let i: usize = match parse_kvp(parts[2], ITERATION_COUNT_KEY)?.parse() {
             Ok(num) => num,
@@ -373,11 +385,11 @@ impl ServerFinal {
             .ok_or(auth::invalid_response("SCRAM"))?;
         let done = response
             .get_bool("done")
-            .or::<Error>(Err(auth::invalid_response("SCRAM")))?;
+            .or(Err(auth::invalid_response("SCRAM")))?;
         let payload = response
             .get_binary_generic("payload")
-            .or::<Error>(Err(auth::invalid_response("SCRAM")))?;
-        let message = str::from_utf8(payload).or::<Error>(Err(auth::invalid_response("SCRAM")))?;
+            .or(Err(auth::invalid_response("SCRAM")))?;
+        let message = str::from_utf8(payload).or(Err(auth::invalid_response("SCRAM")))?;
 
         let first = message
             .chars()
@@ -442,9 +454,13 @@ pub(crate) fn authenticate_stream<T: Read + Write>(
     credential: &MongoCredential,
     scram: ScramVersion,
 ) -> Result<()> {
-    if credential.password().is_none() {
-        return Err(auth::error("SCRAM", "no password supplied"));
-    };
+    let username = credential
+        .username()
+        .ok_or(auth::error("SCRAM", "no username supplied"))?;
+
+    let password = credential
+        .password()
+        .ok_or(auth::error("SCRAM", "no password supplied"))?;
 
     if credential.mechanism_properties().is_some() {
         return Err(auth::error(
@@ -455,7 +471,7 @@ pub(crate) fn authenticate_stream<T: Read + Write>(
 
     let nonce = auth::generate_nonce();
 
-    let client_first = ClientFirst::new(credential.username.as_str(), nonce.as_str());
+    let client_first = ClientFirst::new(username, nonce.as_str());
 
     let server_first_response = pool::run_command_stream(
         stream,
@@ -466,7 +482,23 @@ pub(crate) fn authenticate_stream<T: Read + Write>(
     let server_first = ServerFirst::parse(server_first_response)?;
     server_first.validate(nonce.as_str())?;
 
-    let salted_password = get_salted_password(credential, &server_first, &scram)?;
+    let cache_entry_key = CacheEntry {
+        password: password.clone(),
+        salt: server_first.salt().to_vec(),
+        i: server_first.i(),
+        mechanism: scram.clone(),
+    };
+    let salted_password = if let Some(pwd) = CREDENTIAL_CACHE.read().unwrap().get(&cache_entry_key)
+    {
+        pwd.clone()
+    } else {
+        scram.compute_salted_password(
+            username,
+            password.as_str(),
+            server_first.i(),
+            server_first.salt(),
+        )?
+    };
 
     let client_final = ClientFinal::new(
         salted_password.as_slice(),
@@ -509,6 +541,18 @@ pub(crate) fn authenticate_stream<T: Read + Write>(
             "SCRAM",
             "authentication did not complete successfully",
         ));
+    }
+
+    if CREDENTIAL_CACHE
+        .read()
+        .unwrap()
+        .get(&cache_entry_key)
+        .is_none()
+    {
+        CREDENTIAL_CACHE
+            .write()
+            .unwrap()
+            .insert(cache_entry_key, salted_password.clone());
     }
 
     Ok(())

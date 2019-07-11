@@ -17,6 +17,13 @@ use crate::{
     topology::ServerType,
 };
 
+const SCRAM_SHA_1_STR: &str = "SCRAM-SHA-1";
+const SCRAM_SHA_256_STR: &str = "SCRAM-SHA-256";
+const MONGODB_CR_STR: &str = "MONGODB-CR";
+const GSSAPI_STR: &str = "GSSAPI";
+const MONGODB_X509_STR: &str = "MONGODB-X509";
+const PLAIN_STR: &str = "PLAIN";
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum AuthMechanism {
     MONGODBCR,
@@ -28,6 +35,18 @@ pub enum AuthMechanism {
 }
 
 impl AuthMechanism {
+    pub(crate) fn from_str(str: &str) -> Option<Self> {
+        match str {
+            SCRAM_SHA_1_STR => Some(AuthMechanism::SCRAMSHA1),
+            SCRAM_SHA_256_STR => Some(AuthMechanism::SCRAMSHA256),
+            MONGODB_CR_STR => Some(AuthMechanism::MONGODBCR),
+            MONGODB_X509_STR => Some(AuthMechanism::MONGODBX509),
+            GSSAPI_STR => Some(AuthMechanism::GSSAPI),
+            PLAIN_STR => Some(AuthMechanism::PLAIN),
+            _ => None,
+        }
+    }
+
     pub(crate) fn from_is_master(_reply: &IsMasterCommandResponse) -> AuthMechanism {
         // TODO: RUST-87 check for SCRAM-SHA-256 first
         AuthMechanism::SCRAMSHA1
@@ -37,19 +56,19 @@ impl AuthMechanism {
 impl Display for AuthMechanism {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            AuthMechanism::SCRAMSHA1 => write!(f, "SCRAM-SHA-1"),
-            AuthMechanism::SCRAMSHA256 => write!(f, "SCRAM-SHA-256"),
-            AuthMechanism::MONGODBCR => write!(f, "MONGODB-CR"),
-            AuthMechanism::GSSAPI => write!(f, "GSSAPI"),
-            AuthMechanism::MONGODBX509 => write!(f, "MONGODB-X509"),
-            AuthMechanism::PLAIN => write!(f, "PLAIN"),
+            AuthMechanism::SCRAMSHA1 => f.write_str(SCRAM_SHA_1_STR),
+            AuthMechanism::SCRAMSHA256 => f.write_str(SCRAM_SHA_256_STR),
+            AuthMechanism::MONGODBCR => f.write_str(MONGODB_CR_STR),
+            AuthMechanism::GSSAPI => f.write_str(GSSAPI_STR),
+            AuthMechanism::MONGODBX509 => f.write_str(MONGODB_X509_STR),
+            AuthMechanism::PLAIN => f.write_str(PLAIN_STR),
         }
     }
 }
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct MongoCredential {
-    pub username: String,
+    pub username: Option<String>,
 
     pub source: String,
 
@@ -61,8 +80,11 @@ pub struct MongoCredential {
 }
 
 impl MongoCredential {
-    pub fn username(&self) -> &str {
-        self.username.as_str()
+    pub fn username(&self) -> Option<&str> {
+        match &self.username {
+            Some(s) => Some(s.as_str()),
+            None => None,
+        }
     }
 
     pub fn source(&self) -> &str {
