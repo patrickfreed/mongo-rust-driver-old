@@ -256,11 +256,9 @@ pub fn is_master_stream<T: Read + Write>(
         doc! { "isMaster": 1 }
     };
 
-    if let Some(cred) = credential {
-        if let Some(user) = cred.username() {
-            doc.insert("saslSupportedMechs", format!("{}.{}", cred.source(), user));
-        }
-    };
+    if let Some(credential) = credential {
+        credential.append_needed_mechanism_negotiation(&mut doc);
+    }
 
     let start = PreciseTime::now();
     let response_doc = run_command_stream(stream, "admin", doc, false)?;

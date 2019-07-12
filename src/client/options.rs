@@ -314,6 +314,8 @@ impl ClientOptionsParser {
 
         let (cred_section, hosts_section) = match pre_slash.rfind('@') {
             Some(index) => {
+                // if '@' is in the host section, it MUST be interpreted as a request for
+                // authentication, even if the credentials are empty.
                 let (creds, hosts) = exclusive_split_at(pre_slash, index);
                 match hosts {
                     Some(hs) => (creds, hs),
@@ -325,7 +327,10 @@ impl ClientOptionsParser {
 
         let (username, password) = match cred_section {
             Some(creds) => match creds.find(':') {
-                Some(index) => exclusive_split_at(creds, index),
+                Some(index) => {
+                    let (u, p) = exclusive_split_at(creds, index);
+                    (Some(u.unwrap_or("")), Some(p.unwrap_or("")))
+                }
                 None => (Some(creds), None),
             },
             None => (None, None),
@@ -381,6 +386,7 @@ impl ClientOptionsParser {
             write_concern.validate()?;
         }
 
+        // set username and password
         if let Some(u) = username {
             let mut credential = options.credentials.get_or_insert_with(Default::default);
             let decoded_u = percent_decode(u, "username must be URL encoded")?;
@@ -408,18 +414,21 @@ impl ClientOptionsParser {
             }
         }
 
-        if options.auth_mechanism.is_some() {
+        // set mechanism and source
+        if let Some(mechanism) = options.auth_mechanism.clone() {
             let mut credential = options.credentials.get_or_insert_with(Default::default);
-            credential.mechanism = options.auth_mechanism.clone();
-        }
 
-        if let Some(credential) = &mut options.credentials {
-            // if credentials are specified but no auth source, we first default to the specified
-            // database. otherwise, we use "admin".
-            credential.source = options
-                .auth_source
-                .clone()
-                .unwrap_or(decoded_db.unwrap_or_else(|| "admin".to_string()));
+            if options.auth_source.is_none() {
+                let db = match &decoded_db {
+                    Some(s) => Some(s.as_str()),
+                    None => None,
+                };
+                credential.source = Some(mechanism.default_source(db).to_string());
+            }
+            credential.mechanism = Some(mechanism);
+        } else if let Some(source) = options.auth_source.clone().or(decoded_db) {
+            let mut credential = options.credentials.get_or_insert_with(Default::default);
+            credential.source = Some(source);
         }
 
         Ok(options)

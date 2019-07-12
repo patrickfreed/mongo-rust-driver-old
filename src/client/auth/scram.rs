@@ -462,6 +462,8 @@ pub(crate) fn authenticate_stream<T: Read + Write>(
         .password()
         .ok_or(auth::error("SCRAM", "no password supplied"))?;
 
+    let source = credential.source().unwrap_or("admin");
+
     if credential.mechanism_properties().is_some() {
         return Err(auth::error(
             "SCRAM",
@@ -473,17 +475,13 @@ pub(crate) fn authenticate_stream<T: Read + Write>(
 
     let client_first = ClientFirst::new(username, nonce.as_str());
 
-    let server_first_response = pool::run_command_stream(
-        stream,
-        credential.source.as_str(),
-        client_first.to_command(&scram),
-        false,
-    )?;
+    let server_first_response =
+        pool::run_command_stream(stream, source, client_first.to_command(&scram), false)?;
     let server_first = ServerFirst::parse(server_first_response)?;
     server_first.validate(nonce.as_str())?;
 
     let cache_entry_key = CacheEntry {
-        password: password.clone(),
+        password: password.to_string(),
         salt: server_first.salt().to_vec(),
         i: server_first.i(),
         mechanism: scram.clone(),
@@ -492,12 +490,7 @@ pub(crate) fn authenticate_stream<T: Read + Write>(
     {
         pwd.clone()
     } else {
-        scram.compute_salted_password(
-            username,
-            password.as_str(),
-            server_first.i(),
-            server_first.salt(),
-        )?
+        scram.compute_salted_password(username, password, server_first.i(), server_first.salt())?
     };
 
     let client_final = ClientFinal::new(
@@ -507,12 +500,8 @@ pub(crate) fn authenticate_stream<T: Read + Write>(
         &scram,
     )?;
 
-    let server_final_response = pool::run_command_stream(
-        stream,
-        credential.source.as_str(),
-        client_final.to_command(),
-        false,
-    )?;
+    let server_final_response =
+        pool::run_command_stream(stream, source, client_final.to_command(), false)?;
     let server_final = ServerFinal::parse(server_final_response)?;
     server_final.validate(salted_password.as_slice(), &client_final, &scram)?;
 
@@ -525,8 +514,7 @@ pub(crate) fn authenticate_stream<T: Read + Write>(
         "conversationId": server_final.conversation_id().clone(),
         "payload": Bson::Binary(BinarySubtype::Generic, Vec::new())
     };
-    let server_noop_response =
-        pool::run_command_stream(stream, credential.source.as_str(), noop, false)?;
+    let server_noop_response = pool::run_command_stream(stream, source, noop, false)?;
 
     if server_noop_response
         .get("conversationId")

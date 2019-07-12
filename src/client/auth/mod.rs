@@ -51,6 +51,16 @@ impl AuthMechanism {
         // TODO: RUST-87 check for SCRAM-SHA-256 first
         AuthMechanism::SCRAMSHA1
     }
+
+    /// Get the default authSource for a given mechanism depending on the database provided in the
+    /// connection string.
+    pub(crate) fn default_source(&self, uri_db: Option<&str>) -> String {
+        // TODO: fill in others as they're implemented.
+        match self {
+            AuthMechanism::SCRAMSHA1 | AuthMechanism::SCRAMSHA256 => uri_db.unwrap_or("admin").to_string(),
+            _ => "".to_string(),
+        }
+    }
 }
 
 impl Display for AuthMechanism {
@@ -70,7 +80,7 @@ impl Display for AuthMechanism {
 pub struct MongoCredential {
     pub username: Option<String>,
 
-    pub source: String,
+    pub source: Option<String>,
 
     pub password: Option<String>,
 
@@ -87,20 +97,48 @@ impl MongoCredential {
         }
     }
 
-    pub fn source(&self) -> &str {
-        self.source.as_str()
+    pub fn source(&self) -> Option<&str> {
+        match &self.source {
+            Some(s) => (Some(s.as_str())),
+            None => None,
+        }
     }
 
     pub fn mechanism(&self) -> Option<AuthMechanism> {
         self.mechanism.clone()
     }
 
-    pub fn password(&self) -> Option<String> {
-        self.password.clone()
+    pub fn password(&self) -> Option<&str> {
+        match &self.password {
+            Some(p) => Some(p.as_str()),
+            None => None,
+        }
     }
 
-    pub fn mechanism_properties(&self) -> Option<Document> {
-        self.mechanism_properties.clone()
+    pub fn mechanism_properties(&self) -> Option<&Document> {
+        match &self.mechanism_properties {
+            Some(mp) => Some(&mp),
+            None => None,
+        }
+    }
+
+    /// If the mechanism is missing, append the appropriate mechanism negotiation key-value-pair to
+    /// the provided isMaster command document.
+    pub(crate) fn append_needed_mechanism_negotiation(&self, command: &mut Document) {
+        match (self.username(), self.mechanism()) {
+            (Some(username), None) => {
+                command.insert(
+                    "saslSupportedMechs",
+                    format!(
+                        "{}.{}",
+                        self.source()
+                            .unwrap_or(AuthMechanism::SCRAMSHA1.default_source(None).as_str()),
+                        username
+                    ),
+                );
+            }
+            _ => {}
+        }
     }
 }
 
@@ -133,22 +171,28 @@ pub(crate) fn authenticate_stream<T: Read + Write>(
     stream: &mut T,
     credential: &MongoCredential,
 ) -> Result<()> {
-    // MongoDB handshake
-    let ismaster_response =
-        pool::is_master_stream(stream, true, Some(credential.clone())).or::<Error>(Err(
-            ErrorKind::AuthenticationError("isMaster failed".to_string()).into(),
-        ))?;
+    // Perform handshake and negotiate mechanism if necessary
+    let (ismaster_response, mechanism) = match credential.mechanism() {
+        Some(mech) => {
+            let resp = pool::is_master_stream(stream, true, None).or::<Error>(Err(
+                ErrorKind::AuthenticationError("isMaster failed".to_string()).into(),
+            ))?;
+            (resp, mech)
+        }
+        None => {
+            let resp = pool::is_master_stream(stream, true, Some(credential.clone())).or::<Error>(
+                Err(ErrorKind::AuthenticationError("isMaster failed".to_string()).into()),
+            )?;
+            let mech = AuthMechanism::from_is_master(&resp.command_response);
+            (resp, mech)
+        }
+    };
 
     // Verify server can authenticate
     let server_type = ServerType::from_ismaster_response(&ismaster_response.command_response);
     if !server_type.can_auth() {
         return Ok(());
     };
-
-    // Use the user-specified mechanism or get one from the isMaster response
-    let mechanism = credential
-        .mechanism()
-        .unwrap_or_else(|| AuthMechanism::from_is_master(&ismaster_response.command_response));
 
     // Authenticate according to the decided upon mechanism.
     match mechanism {
