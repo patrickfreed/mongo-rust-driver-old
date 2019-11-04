@@ -1,4 +1,5 @@
 mod auth;
+mod command_monitoring;
 mod connection_stepdown;
 mod crud;
 mod read_write_concern;
