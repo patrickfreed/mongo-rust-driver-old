@@ -3,12 +3,12 @@ use std::time::Duration;
 use bson::{bson, doc, Bson, Document};
 use serde::Deserialize;
 
-use mongodb::{
+use crate::{
+    bson_util,
     options::{FindOptions, Hint, InsertManyOptions},
+    test::{EventClient, CLIENT},
     Collection,
 };
-
-use crate::{util::EventClient, CLIENT};
 
 #[derive(Debug, Deserialize)]
 struct TestFile {
@@ -336,8 +336,8 @@ fn run_test(test_file: TestFile) {
                             command.insert("limit", doc! {"$numberLong": limit.to_string()});
                         }
 
-                        crate::sort_document(&mut command);
-                        crate::sort_document(&mut expected_command);
+                        bson_util::sort_document(&mut command);
+                        bson_util::sort_document(&mut expected_command);
 
                         assert_eq!(command, expected_command);
                     }
@@ -418,8 +418,8 @@ fn run_test(test_file: TestFile) {
                             }
                         }
 
-                        crate::sort_document(&mut command);
-                        crate::sort_document(&mut expected_command);
+                        bson_util::sort_document(&mut command);
+                        bson_util::sort_document(&mut expected_command);
 
                         assert_eq!(command, expected_command);
                     }
@@ -435,5 +435,5 @@ fn run_test(test_file: TestFile) {
 
 #[test]
 fn run() {
-    crate::spec::test(&["command-monitoring"], run_test);
+    crate::test::run_spec_test(&["command-monitoring"], run_test);
 }

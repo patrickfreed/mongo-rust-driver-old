@@ -1,13 +1,6 @@
 use std::sync::{Arc, RwLock};
 
 use bson::{bson, doc};
-use mongodb::{
-    event::{
-        cmap::{CmapEventHandler, PoolClearedEvent},
-        command::{CommandEventHandler, CommandStartedEvent},
-    },
-    Collection,
-};
 
 use super::TestClient;
 use crate::{
@@ -16,6 +9,7 @@ use crate::{
         command::{CommandEventHandler, CommandStartedEvent},
     },
     test::LOCK,
+    Collection,
 };
 
 pub type EventQueue<T> = Arc<RwLock<Vec<T>>>;
