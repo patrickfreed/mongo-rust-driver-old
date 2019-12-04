@@ -1,12 +1,13 @@
 use std::time::Duration;
 
 use bson::{bson, doc, Bson, Document};
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 
 use crate::{
     bson_util,
+    error::Result,
     options::{FindOptions, Hint, InsertManyOptions},
-    test::{EventClient, CLIENT},
+    test::{EventClient, TestEvent, CLIENT},
     Collection,
 };
 
@@ -112,23 +113,91 @@ struct UpdateArguments {
 }
 
 fn get_command_name(operation_name: &str) -> &[&str] {
-    match &operation_name.to_lowercase()[..] {
-        "deletemany" => &["delete"],
+    &[""]
+}
 
-        "deleteone" => &["delete"],
+#[derive(Deserialize)]
+struct CommandMonitoringTestFile {
+    data: Vec<Document>,
+    collection_name: String,
+    database_name: String,
+    tests: Vec<CommandMonitoringTest>,
+}
 
-        "find" => &["find", "getMore"],
+trait TestOperation {
+    fn name(&self) -> &str;
 
-        "insertmany" => &["insert"],
+    fn command_name(&self) -> &str;
 
-        "insertone" => &["insert"],
+    fn run(&self, collection: Collection) -> Result<()>;
+}
 
-        "updatemany" => &["update"],
+#[derive(Deserialize)]
+struct CommandMonitoringTest {
+    description: String,
+    operation: Document,
+    expectations: Vec<TestEvent>,
+}
 
-        "updateone" => &["update"],
+fn run_command_monitoring_test<T: TestOperation + DeserializeOwned>(test_file_path: &[&str]) {
+    let test_file: CommandMonitoringTestFile = crate::test::spec::load_test(test_file_path);
 
-        s => panic!("unexpected command! Received {}", s),
+    for test_case in test_file.tests {
+        println!("Running {}", test_case.description);
+
+        let collection =
+            CLIENT.init_db_and_coll(&test_file.database_name, &test_file.collection_name);
+
+        collection
+            .insert_many(test_file.data.clone(), None)
+            .expect("insert many error");
+
+        let operation: T = bson::from_bson(Bson::Document(test_case.operation)).unwrap();
+
+        let client = EventClient::new();
+
+        let events = client.run_operation_with_events(
+            &[operation.command_name()],
+            &test_file.database_name,
+            &test_file.collection_name,
+            |collection| {
+                let _ = operation.run(collection);
+            },
+        );
+
+        for (i, event) in test_case.expectations.iter().enumerate() {
+            assert_eq!(&events[i], event);
+        }
     }
+}
+
+#[derive(Deserialize)]
+struct RunCommandTestOperation {
+    name: String,
+    arguments: Document,
+}
+
+impl TestOperation for RunCommandTestOperation {
+    fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    fn command_name(&self) -> &str {
+        self.name()
+    }
+
+    fn run(&self, collection: Collection) -> Result<()> {
+        let mut command = doc! {
+            self.command_name(): collection.name(),
+        };
+        command.extend(self.arguments.clone());
+        collection.db().run_command(command, None).map(|_| ())
+    }
+}
+
+#[test]
+fn command_tests() {
+    run_command_monitoring_test::<RunCommandTestOperation>(&["command_monitoring", "command.json"])
 }
 
 #[allow(unused_must_use)]
@@ -231,209 +300,209 @@ fn run_command(collection: Collection, name: &str, mut arguments: Document) {
     }
 }
 
-fn run_test(test_file: TestFile) {
-    for test_case in test_file.tests {
-        let collection =
-            CLIENT.init_db_and_coll(&test_file.database_name, &test_file.collection_name);
+// fn run_test(test_file: TestFile) {
+//     for test_case in test_file.tests {
+//         let collection =
+//             CLIENT.init_db_and_coll(&test_file.database_name, &test_file.collection_name);
 
-        collection
-            .insert_many(test_file.data.clone(), None)
-            .expect("insert many error");
-        // bulk write not implemented and kill cursor not supported
-        if test_case.description.contains("bulk write")
-            || test_case.description.contains("killcursors")
-            || test_case.description.contains("kills the cursor")
-        {
-            continue;
-        }
-        let name = test_case.operation.name.as_str();
-        // count is deprecated
-        if name == "count" {
-            continue;
-        }
+//         collection
+//             .insert_many(test_file.data.clone(), None)
+//             .expect("insert many error");
+//         // bulk write not implemented and kill cursor not supported
+//         if test_case.description.contains("bulk write")
+//             || test_case.description.contains("killcursors")
+//             || test_case.description.contains("kills the cursor")
+//         {
+//             continue;
+//         }
+//         let name = test_case.operation.name.as_str();
+//         // count is deprecated
+//         if name == "count" {
+//             continue;
+//         }
 
-        let arguments = test_case.operation.arguments;
-        let client = EventClient::new();
+//         let arguments = test_case.operation.arguments;
+//         let client = EventClient::new();
 
-        let command_name = get_command_name(name);
+//         let command_name = get_command_name(name);
 
-        let events = client.run_operation_with_events(
-            command_name,
-            &test_file.database_name,
-            &test_file.collection_name,
-            |collection| {
-                run_command(collection, name, arguments);
-            },
-        );
+//         let events = client.run_operation_with_events(
+//             command_name,
+//             &test_file.database_name,
+//             &test_file.collection_name,
+//             |collection| {
+//                 run_command(collection, name, arguments);
+//             },
+//         );
 
-        let mut i = 0;
-        for expectation in test_case.expectations {
-            if let Some(expected_command_started_event) = expectation.command_started_event.clone()
-            {
-                let event = &events[i];
+//         let mut i = 0;
+//         for expectation in test_case.expectations {
+//             if let Some(expected_command_started_event) =
+// expectation.command_started_event.clone()             {
+//                 let event = &events[i];
 
-                let expected_command_name: String = bson::from_bson(
-                    expected_command_started_event
-                        .get("command_name")
-                        .unwrap()
-                        .clone(),
-                )
-                .unwrap();
+//                 let expected_command_name: String = bson::from_bson(
+//                     expected_command_started_event
+//                         .get("command_name")
+//                         .unwrap()
+//                         .clone(),
+//                 )
+//                 .unwrap();
 
-                assert_eq!(event.command_name, expected_command_name);
+//                 assert_eq!(event.command_name, expected_command_name);
 
-                let expected_database_name: String = bson::from_bson(
-                    expected_command_started_event
-                        .get("database_name")
-                        .unwrap()
-                        .clone(),
-                )
-                .unwrap();
-                assert_eq!(event.db, expected_database_name);
+//                 let expected_database_name: String = bson::from_bson(
+//                     expected_command_started_event
+//                         .get("database_name")
+//                         .unwrap()
+//                         .clone(),
+//                 )
+//                 .unwrap();
+//                 assert_eq!(event.db, expected_database_name);
 
-                match expected_command_name.as_str() {
-                    "delete" => {
-                        let expected_command: DeleteCommand = bson::from_bson(
-                            expected_command_started_event
-                                .get("command")
-                                .unwrap()
-                                .clone(),
-                        )
-                        .expect("expected command won't convert");
+//                 match expected_command_name.as_str() {
+//                     "delete" => {
+//                         let expected_command: DeleteCommand = bson::from_bson(
+//                             expected_command_started_event
+//                                 .get("command")
+//                                 .unwrap()
+//                                 .clone(),
+//                         )
+//                         .expect("expected command won't convert");
 
-                        let mut command = event.command.clone();
-                        if !command.contains_key("ordered") {
-                            command.insert("ordered", true);
-                        }
+//                         let mut command = event.command.clone();
+//                         if !command.contains_key("ordered") {
+//                             command.insert("ordered", true);
+//                         }
 
-                        let actual_command: DeleteCommand =
-                            bson::from_bson(Bson::Document(command.clone()))
-                                .expect("actual command won't convert");
+//                         let actual_command: DeleteCommand =
+//                             bson::from_bson(Bson::Document(command.clone()))
+//                                 .expect("actual command won't convert");
 
-                        assert_eq!(actual_command, expected_command);
-                    }
-                    "find" => {
-                        let mut expected_command: Document = bson::from_bson(
-                            expected_command_started_event
-                                .get("command")
-                                .unwrap()
-                                .clone(),
-                        )
-                        .expect("expected command won't convert");
+//                         assert_eq!(actual_command, expected_command);
+//                     }
+//                     "find" => {
+//                         let mut expected_command: Document = bson::from_bson(
+//                             expected_command_started_event
+//                                 .get("command")
+//                                 .unwrap()
+//                                 .clone(),
+//                         )
+//                         .expect("expected command won't convert");
 
-                        let mut command = event.command.clone();
+//                         let mut command = event.command.clone();
 
-                        if let Some(skip) = command.remove("skip") {
-                            command.insert("skip", doc! {"$numberLong": skip.to_string()});
-                        }
+//                         if let Some(skip) = command.remove("skip") {
+//                             command.insert("skip", doc! {"$numberLong": skip.to_string()});
+//                         }
 
-                        if let Some(batch_size) = command.remove("batchSize") {
-                            command
-                                .insert("batchSize", doc! {"$numberLong": batch_size.to_string()});
-                        }
+//                         if let Some(batch_size) = command.remove("batchSize") {
+//                             command
+//                                 .insert("batchSize", doc! {"$numberLong":
+// batch_size.to_string()});                         }
 
-                        if let Some(limit) = command.remove("limit") {
-                            command.insert("limit", doc! {"$numberLong": limit.to_string()});
-                        }
+//                         if let Some(limit) = command.remove("limit") {
+//                             command.insert("limit", doc! {"$numberLong": limit.to_string()});
+//                         }
 
-                        bson_util::sort_document(&mut command);
-                        bson_util::sort_document(&mut expected_command);
+//                         bson_util::sort_document(&mut command);
+//                         bson_util::sort_document(&mut expected_command);
 
-                        assert_eq!(command, expected_command);
-                    }
-                    "insert" => {
-                        let expected_command: InsertCommand = bson::from_bson(
-                            expected_command_started_event
-                                .get("command")
-                                .unwrap()
-                                .clone(),
-                        )
-                        .expect("expected command won't convert");
+//                         assert_eq!(command, expected_command);
+//                     }
+//                     "insert" => {
+//                         let expected_command: InsertCommand = bson::from_bson(
+//                             expected_command_started_event
+//                                 .get("command")
+//                                 .unwrap()
+//                                 .clone(),
+//                         )
+//                         .expect("expected command won't convert");
 
-                        let mut command = event.command.clone();
-                        if !command.contains_key("ordered") {
-                            command.insert("ordered", true);
-                        }
+//                         let mut command = event.command.clone();
+//                         if !command.contains_key("ordered") {
+//                             command.insert("ordered", true);
+//                         }
 
-                        let actual_command: InsertCommand =
-                            bson::from_bson(Bson::Document(command.clone()))
-                                .expect("actual command won't convert");
+//                         let actual_command: InsertCommand =
+//                             bson::from_bson(Bson::Document(command.clone()))
+//                                 .expect("actual command won't convert");
 
-                        assert_eq!(actual_command, expected_command);
-                    }
-                    "update" => {
-                        let expected_command: UpdateCommand = bson::from_bson(
-                            expected_command_started_event
-                                .get("command")
-                                .unwrap()
-                                .clone(),
-                        )
-                        .expect("expected command won't convert");
+//                         assert_eq!(actual_command, expected_command);
+//                     }
+//                     "update" => {
+//                         let expected_command: UpdateCommand = bson::from_bson(
+//                             expected_command_started_event
+//                                 .get("command")
+//                                 .unwrap()
+//                                 .clone(),
+//                         )
+//                         .expect("expected command won't convert");
 
-                        let mut command = event.command.clone();
-                        if !command.contains_key("ordered") {
-                            command.insert("ordered", true);
-                        }
+//                         let mut command = event.command.clone();
+//                         if !command.contains_key("ordered") {
+//                             command.insert("ordered", true);
+//                         }
 
-                        let actual_command: UpdateCommand =
-                            bson::from_bson(Bson::Document(command.clone()))
-                                .expect("actual command won't convert");
+//                         let actual_command: UpdateCommand =
+//                             bson::from_bson(Bson::Document(command.clone()))
+//                                 .expect("actual command won't convert");
 
-                        assert_eq!(actual_command, expected_command);
-                    }
+//                         assert_eq!(actual_command, expected_command);
+//                     }
 
-                    "getMore" => {
-                        let mut expected_command: Document = bson::from_bson(
-                            expected_command_started_event
-                                .get("command")
-                                .unwrap()
-                                .clone(),
-                        )
-                        .expect("expected command won't convert");
+//                     "getMore" => {
+//                         let mut expected_command: Document = bson::from_bson(
+//                             expected_command_started_event
+//                                 .get("command")
+//                                 .unwrap()
+//                                 .clone(),
+//                         )
+//                         .expect("expected command won't convert");
 
-                        let mut command = event.command.clone();
+//                         let mut command = event.command.clone();
 
-                        if let Some(batch_size) = command.remove("batchSize") {
-                            command.insert(
-                                "batchSize",
-                                doc! {"$numberLong":
-                                batch_size.to_string()},
-                            );
-                        }
+//                         if let Some(batch_size) = command.remove("batchSize") {
+//                             command.insert(
+//                                 "batchSize",
+//                                 doc! {"$numberLong":
+//                                 batch_size.to_string()},
+//                             );
+//                         }
 
-                        if let Some(doc) = expected_command.remove("getMore") {
-                            if doc
-                                .as_document()
-                                .unwrap()
-                                .get("$numberLong")
-                                .unwrap()
-                                .as_str()
-                                .unwrap()
-                                == "42"
-                            {
-                                let id = command.remove("getMore").unwrap().as_i64().unwrap();
-                                assert!(id > 0);
-                            } else {
-                                expected_command.insert("getMore", doc);
-                            }
-                        }
+//                         if let Some(doc) = expected_command.remove("getMore") {
+//                             if doc
+//                                 .as_document()
+//                                 .unwrap()
+//                                 .get("$numberLong")
+//                                 .unwrap()
+//                                 .as_str()
+//                                 .unwrap()
+//                                 == "42"
+//                             {
+//                                 let id = command.remove("getMore").unwrap().as_i64().unwrap();
+//                                 assert!(id > 0);
+//                             } else {
+//                                 expected_command.insert("getMore", doc);
+//                             }
+//                         }
 
-                        bson_util::sort_document(&mut command);
-                        bson_util::sort_document(&mut expected_command);
+//                         bson_util::sort_document(&mut command);
+//                         bson_util::sort_document(&mut expected_command);
 
-                        assert_eq!(command, expected_command);
-                    }
-                    s => {
-                        panic!("this case should not occur. Received {}", s);
-                    }
-                }
-                i += 1;
-            }
-        }
-    }
-}
+//                         assert_eq!(command, expected_command);
+//                     }
+//                     s => {
+//                         panic!("this case should not occur. Received {}", s);
+//                     }
+//                 }
+//                 i += 1;
+//             }
+//         }
+//     }
+// }
 
-#[test]
-fn run() {
-    crate::test::run_spec_test(&["command-monitoring"], run_test);
-}
+// #[test]
+// fn run() {
+//     crate::test::run_spec_test(&["command-monitoring"], run_test);
+// }

@@ -105,6 +105,11 @@ impl Collection {
         &self.inner.client
     }
 
+    /// Get the `Database` that this collection descended from.
+    pub(crate) fn db(&self) -> &Database {
+        &self.inner.db
+    }
+
     /// Gets the name of the `Collection`.
     pub fn name(&self) -> &str {
         &self.inner.name

@@ -43,3 +43,23 @@ where
         run_test_file(bson::from_bson(Bson::from(json)).unwrap())
     }
 }
+
+pub(crate) fn load_test<'a, T>(spec: &[&str]) -> T
+where
+    T: Deserialize<'a>,
+{
+    let base_path: PathBuf = [env!("CARGO_MANIFEST_DIR"), "src", "test", "spec", "json"]
+        .iter()
+        .chain(spec.iter())
+        .collect();
+
+    let test_file_path = PathBuf::from(base_path);
+    if test_file_path.extension().and_then(OsStr::to_str) != Some("json") {
+        panic!("not a json file!");
+    }
+
+    let json: Value =
+        serde_json::from_reader(File::open(test_file_path.as_path()).unwrap()).unwrap();
+
+    bson::from_bson(Bson::from(json)).unwrap()
+}

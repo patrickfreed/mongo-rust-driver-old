@@ -1,7 +1,10 @@
 mod event;
 mod lock;
 
-pub use self::{event::EventClient, lock::TestLock};
+pub use self::{
+    event::{EventClient, TestEvent},
+    lock::TestLock,
+};
 
 use std::{collections::HashMap, sync::Arc};
 

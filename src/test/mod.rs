@@ -4,7 +4,10 @@ mod db;
 mod spec;
 mod util;
 
-pub(crate) use self::{spec::run_spec_test, util::EventClient};
+pub(crate) use self::{
+    spec::run_spec_test,
+    util::{EventClient, TestEvent},
+};
 
 use lazy_static::lazy_static;
 
